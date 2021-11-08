@@ -1,0 +1,96 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  # 后缀不固定，随机生成名字。
+  generateName: app-sidecar-logtail-
+  namespace: default
+spec:
+  volumes:
+  # 定义应用容器和 Logtail Sidecar 容器的共享目录。
+  - emptyDir: {}
+    name: share
+  # 定义宿主机上的数据目录，应用容器将在该目录下创建子目录作为自己的数据目录。
+  - hostPath:
+      path: /data
+      type: DirectoryOrCreate
+    name: parent-data-dir-on-host
+  containers:
+  # 应用容器，以文件形式输出日志。
+  - name: app
+    # 应用程序执行逻辑：
+    # 1. 在宿主机数据目录下创建相应的子目录作为自身的数据目录。
+    # 2. 为该数据目录创建相应的软链接，通过共享目录分享给 Sidecar 容器。
+    # 3. 执行应用程序逻辑（此处为不断产生 mock 数据）。
+    # 该镜像的 Dockerfile 及启动脚本参考目录 app。
+    image: registry.cn-hangzhou.aliyuncs.com/log-service/docker-log-test:sidecar-app
+    imagePullPolicy: Always
+    volumeMounts:
+    # 挂载共享目录，以向 Sidecar 容器分享数据。
+    - mountPath: /share
+      name: share
+    # 挂载宿主机数据目录，以创建相应的子目录。
+    - mountPath: /data
+      name: parent-data-dir-on-host
+    env:
+    # 获取 PodName 以在宿主机上为该 Pod 创建相应的数据目录。
+    - name: POD_NAME
+      valueFrom:
+        fieldRef:
+          fieldPath: metadata.name
+    - name: POD_DATA_DIR
+      value: /data/$(POD_NAME)
+  # Logtail Sidecar 容器，共享应用容器日志目录采集日志。
+  - name: logtail
+    image: registry-vpc.cn-hangzhou.aliyuncs.com/log-service/logtail:v1.0.25.0-eca7ef7-aliyun
+    volumeMounts:
+    # 只读挂载共享目录，获取日志数据。
+    - mountPath: /share
+      name: share
+      readOnly: true
+    - mountPath: /data
+      name: parent-data-dir-on-host
+      readOnly: true
+    env:
+    # 为每条日志附加 Pod 相关的属性，以便溯源。
+    # 可通过修改 ALIYUN_LOG_ENV_TAGS 的值按需增/删字段，字段间使用 | 分隔。
+    # 如何获取 Pod 属性可参考此文档：https://kubernetes.io/zh/docs/tasks/inject-data-application/environment-variable-expose-pod-information/
+    - name: ALIYUN_LOG_ENV_TAGS
+      value: _node_name_|_node_ip_|_pod_name_|_pod_namespace_
+    - name: _node_name_
+      valueFrom:
+        fieldRef:
+          apiVersion: v1
+          fieldPath: spec.nodeName
+    - name: _node_ip_
+      valueFrom:
+        fieldRef:
+          apiVersion: v1
+          fieldPath: status.hostIP
+    - name: _pod_name_
+      valueFrom:
+        fieldRef:
+          fieldPath: metadata.name
+    - name: _pod_namespace_
+      valueFrom:
+        fieldRef:
+          fieldPath: metadata.namespace
+    # 设置 Logtail 使用的配置文件，以访问到指定区域的 SLS。
+    # 规则：/etc/ilogtail/conf/<region>-<network_type>/ilogtail_config.json
+    # - <region> 表示区域，比如 cn-hangzhou, cn-shanghai
+    # - <network_type> 表示使用的网络类型，intranet 内网、internet 公网、acceleration 全球加速
+    # 示例：
+    # - 公网访问杭州公有云：/etc/ilogtail/conf/cn-hangzhou-internet/ilogtail_config.json
+    # - 全球加速访问上海公有云：/etc/ilogtail/conf/cn-shanghai-acceleration/ilogtail_config.json
+    - name: ALIYUN_LOGTAIL_CONFIG
+      value: '/etc/ilogtail/conf/cn-hangzhou-internet/ilogtail_config.json'
+    # 设置 Logtail 实例的自定义标识符，以关联机器组并获取采集配置。可设置多个，使用英文逗号（,）分隔。
+    - name: ALIYUN_LOGTAIL_USER_DEFINED_ID
+      value: sidecar-logtail-1,sidecar-logtail-2
+    # 设置 ALIUID，以访问相应的 SLS Project。可设置多个，使用英文逗号（,）分隔。
+    - name: ALIYUN_LOGTAIL_USER_ID
+      value: "12345678"
+    # 其他启动参数：参考 https://help.aliyun.com/document_detail/32278.html
+    - name: cpu_usage_limit
+      value: "2.0"
+    - name: mem_usage_limit
+      value: "1024"
